@@ -5,12 +5,9 @@ generator client {
   provider = "prisma-client-js"
 }
 
-// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
-// enough when changing adapters.
-// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Session {
@@ -31,4 +28,85 @@ model Session {
   emailVerified Boolean?  @default(false)
   refreshToken        String?
   refreshTokenExpires DateTime?
+}
+
+model Brand {
+  id               String     @id @default(cuid())
+  shop             String     @unique
+  programActive    Boolean    @default(true)
+  refereePercent   Int        @default(10)
+  refereeMaxUses   Int        @default(1)
+  refereeMinSpend  Int        @default(0)
+  refererPercent   Int        @default(10)
+  rewardExpiryDays Int        @default(30)
+  fromEmail        String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  referrers        Referrer[]
+  referrals        Referral[]
+}
+
+model Referrer {
+  id                String     @id @default(cuid())
+  brandId           String
+  brand             Brand      @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  shopifyCustomerId String?
+  email             String
+  code              String     @unique
+  firstOrderId      String?
+  createdAt         DateTime   @default(now())
+  referrals         Referral[]
+  rewards           Reward[]
+
+  @@unique([brandId, email])
+  @@index([brandId, shopifyCustomerId])
+}
+
+enum ReferralStatus {
+  CLAIMED
+  CONVERTED
+  REJECTED_SELF
+  REJECTED_EXISTING
+  REJECTED_FRAUD
+  EXPIRED
+}
+
+model Referral {
+  id            String         @id @default(cuid())
+  brandId       String
+  brand         Brand          @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  referrerId    String
+  referrer      Referrer       @relation(fields: [referrerId], references: [id], onDelete: Cascade)
+  friendEmail   String
+  refereeCodeId String?
+  refereeCode   String?
+  status        ReferralStatus @default(CLAIMED)
+  orderId       String?
+  ipHash        String?
+  userAgent     String?
+  createdAt     DateTime       @default(now())
+  convertedAt   DateTime?
+  reward        Reward?
+
+  @@unique([brandId, friendEmail])
+  @@index([brandId, status])
+}
+
+model Reward {
+  id            String   @id @default(cuid())
+  referrerId    String
+  referrer      Referrer @relation(fields: [referrerId], references: [id], onDelete: Cascade)
+  referralId    String   @unique
+  referral      Referral @relation(fields: [referralId], references: [id], onDelete: Cascade)
+  shopifyCodeId String
+  code          String
+  emailedAt     DateTime?
+  createdAt     DateTime @default(now())
+}
+
+model ProcessedWebhook {
+  id        String   @id
+  topic     String
+  shop      String
+  createdAt DateTime @default(now())
 }
