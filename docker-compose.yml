@@ -1,21 +1,21 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: stickycart-postgres
+    container_name: gluesale-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: stickycart
-      POSTGRES_PASSWORD: stickycart
-      POSTGRES_DB: stickycart
+      POSTGRES_USER: gluesale
+      POSTGRES_PASSWORD: gluesale
+      POSTGRES_DB: gluesale
     ports:
       - "5440:5432"
     volumes:
-      - stickycart_pgdata:/var/lib/postgresql/data
+      - gluesale_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U stickycart -d stickycart"]
+      test: ["CMD-SHELL", "pg_isready -U gluesale -d gluesale"]
       interval: 5s
       timeout: 5s
       retries: 10
 
 volumes:
-  stickycart_pgdata:
+  gluesale_pgdata:

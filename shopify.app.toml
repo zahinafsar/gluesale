@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "ce62d016b043053515604062ba02ea99"
-name = "StickyCart"
+name = "Gluesale"
 application_url = "https://example.com"
 embedded = true
 

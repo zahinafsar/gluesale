@@ -1,8 +1,8 @@
 # Production config — switch with: shopify app config use production
 
 client_id = "ce62d016b043053515604062ba02ea99"
-name = "StickyCart"
-application_url = "https://stickycart.zahinafsar.com"
+name = "Gluesale"
+application_url = "https://app.gluesale.com"
 embedded = true
 
 [build]
@@ -39,12 +39,12 @@ api_version = "2026-07"
 scopes = "write_products,write_metaobjects,write_metaobject_definitions,read_customers,read_orders,write_discounts"
 
 [app_proxy]
-url = "https://stickycart.zahinafsar.com/proxy/referral"
+url = "https://app.gluesale.com/proxy/referral"
 subpath = "referral"
 prefix = "apps"
 
 [auth]
-redirect_urls = [ "https://stickycart.zahinafsar.com/api/auth" ]
+redirect_urls = [ "https://app.gluesale.com/api/auth" ]
 
 [product.metafields.app.demo_info]
 type = "single_line_text_field"

@@ -14,5 +14,5 @@ export const env = {
   RESEND_REPLY_TO: () => optional("RESEND_REPLY_TO"),
   SHOPIFY_API_SECRET: () => required("SHOPIFY_API_SECRET"),
   SHOPIFY_APP_URL: () => required("SHOPIFY_APP_URL"),
-  REFERRAL_IP_SALT: () => optional("REFERRAL_IP_SALT", "stickycart-dev-salt"),
+  REFERRAL_IP_SALT: () => optional("REFERRAL_IP_SALT", "gluesale-dev-salt"),
 };

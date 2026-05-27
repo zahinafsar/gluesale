@@ -1,5 +1,5 @@
 {
-  "name": "stickycart",
+  "name": "gluesale",
   "private": true,
   "scripts": {
     "build": "react-router build",
