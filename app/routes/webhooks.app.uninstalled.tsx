@@ -1,14 +1,16 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+import { recordWebhook } from "../lib/webhook.server";
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { shop, session, topic } = await authenticate.webhook(request);
+  const { shop, session, topic, payload, webhookId, apiVersion } = await authenticate.webhook(request);
 
   console.log(`Received ${topic} webhook for ${shop}`);
 
-  // Webhook requests can trigger multiple times and after an app has already been uninstalled.
-  // If this webhook already ran, the session may have been deleted previously.
+  const { duplicate } = await recordWebhook({ webhookId, topic, shop, apiVersion, payload });
+  if (duplicate) return new Response();
+
   if (session) {
     await db.session.deleteMany({ where: { shop } });
   }

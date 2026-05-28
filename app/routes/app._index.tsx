@@ -3,28 +3,31 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useFetcher, useLoaderData } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { getOrCreateBrand } from "../lib/referral.server";
+import { getOrCreateBrand } from "../lib/customer.server";
+import { getReferralConfig } from "../lib/feature.server";
+import {
+  parseDiscountConfig,
+  type DiscountConfig,
+  type DiscountType,
+} from "../lib/discount-config";
 
 type LoaderData = {
-  brand: {
-    id: string;
-    shop: string;
-    programActive: boolean;
-    refereePercent: number;
-    refererPercent: number;
-    rewardExpiryDays: number;
+  brand: { id: string; shop: string };
+  config: {
+    enabled: boolean;
+    firstPurchaseOnly: boolean;
+    preventDeviceReuse: boolean;
+    maxReferralsPerUser: number | null;
+    refereeDiscount: DiscountConfig;
+    referrerDiscount: DiscountConfig;
   };
-  stats: {
-    total: number;
-    claimed: number;
-    converted: number;
-  };
+  stats: { total: number; claimed: number; converted: number };
   recent: Array<{
     id: string;
     friendEmail: string;
@@ -37,33 +40,38 @@ type LoaderData = {
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const brand = await getOrCreateBrand(session.shop);
+  const config = await getReferralConfig(brand);
 
   const [total, claimed, converted, recent] = await Promise.all([
-    prisma.referral.count({ where: { brandId: brand.id } }),
-    prisma.referral.count({ where: { brandId: brand.id, status: "CLAIMED" } }),
-    prisma.referral.count({ where: { brandId: brand.id, status: "CONVERTED" } }),
+    prisma.referral.count({ where: { referralConfigId: config.id } }),
+    prisma.referral.count({ where: { referralConfigId: config.id, status: "CLAIMED" } }),
+    prisma.referral.count({ where: { referralConfigId: config.id, status: "CONVERTED" } }),
     prisma.referral.findMany({
-      where: { brandId: brand.id },
+      where: { referralConfigId: config.id },
       orderBy: { createdAt: "desc" },
       take: 20,
-      include: { referrer: true },
+      include: {
+        referrer: { include: { customer: true } },
+        referee: { include: { customer: true } },
+      },
     }),
   ]);
 
   const data: LoaderData = {
-    brand: {
-      id: brand.id,
-      shop: brand.shop,
-      programActive: brand.programActive,
-      refereePercent: brand.refereePercent,
-      refererPercent: brand.refererPercent,
-      rewardExpiryDays: brand.rewardExpiryDays,
+    brand: { id: brand.id, shop: brand.shop },
+    config: {
+      enabled: config.enabled,
+      firstPurchaseOnly: config.firstPurchaseOnly,
+      preventDeviceReuse: config.preventDeviceReuse,
+      maxReferralsPerUser: config.maxReferralsPerUser,
+      refereeDiscount: parseDiscountConfig(config.refereeDiscount),
+      referrerDiscount: parseDiscountConfig(config.referrerDiscount),
     },
     stats: { total, claimed, converted },
     recent: recent.map((r) => ({
       id: r.id,
-      friendEmail: r.friendEmail,
-      referrerEmail: r.referrer.email,
+      friendEmail: r.referee.customer.email,
+      referrerEmail: r.referrer.customer.email,
       status: r.status,
       createdAt: r.createdAt.toISOString(),
     })),
@@ -71,111 +79,372 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return data;
 };
 
+function numOr(v: FormDataEntryValue | null, fallback: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function intOr(v: FormDataEntryValue | null, fallback: number): number {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function nullableInt(v: FormDataEntryValue | null, fallback: number | null): number | null {
+  if (v == null || String(v).trim() === "") return null;
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return n;
+}
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
-  const form = await request.formData();
   const brand = await getOrCreateBrand(session.shop);
+  const current = await getReferralConfig(brand);
+  const form = await request.formData();
 
-  await prisma.brand.update({
-    where: { id: brand.id },
+  const currentReferee = parseDiscountConfig(current.refereeDiscount);
+  const currentReferrer = parseDiscountConfig(current.referrerDiscount);
+
+  const refereeType: DiscountType =
+    String(form.get("refereeType")) === "FIXED_AMOUNT" ? "FIXED_AMOUNT" : "PERCENT";
+  const refereeAmount = Math.max(0.01, numOr(form.get("refereeAmount"), currentReferee.amount));
+
+  const referrerTypeRaw = String(form.get("referrerType"));
+  const referrerType: DiscountType =
+    referrerTypeRaw === "FIXED_AMOUNT"
+      ? "FIXED_AMOUNT"
+      : referrerTypeRaw === "NONE"
+        ? "NONE"
+        : "PERCENT";
+  const referrerAmount =
+    referrerType === "NONE"
+      ? currentReferrer.amount
+      : Math.max(0.01, numOr(form.get("referrerAmount"), currentReferrer.amount));
+
+  const refereeDiscount: DiscountConfig = {
+    type: refereeType,
+    amount: refereeType === "PERCENT" ? Math.min(100, Math.max(1, refereeAmount)) : refereeAmount,
+    validity_seconds:
+      Math.max(1, intOr(form.get("refereeValidityDays"), Math.round(currentReferee.validity_seconds / 86400))) * 86400,
+    max_uses: nullableInt(form.get("refereeMaxUses"), currentReferee.max_uses),
+    min_order_amount: Math.max(0, numOr(form.get("refereeMinOrder"), currentReferee.min_order_amount)),
+  };
+
+  const referrerDiscount: DiscountConfig = {
+    type: referrerType,
+    amount: referrerType === "PERCENT" ? Math.min(100, Math.max(1, referrerAmount)) : referrerAmount,
+    validity_seconds:
+      Math.max(1, intOr(form.get("referrerValidityDays"), Math.round(currentReferrer.validity_seconds / 86400))) * 86400,
+    max_uses: nullableInt(form.get("referrerMaxUses"), currentReferrer.max_uses),
+    min_order_amount: Math.max(0, numOr(form.get("referrerMinOrder"), currentReferrer.min_order_amount)),
+  };
+
+  const eligibility = form.getAll("eligibility").map(String);
+
+  await prisma.referralConfig.update({
+    where: { id: current.id },
     data: {
-      programActive: form.get("programActive") === "on",
-      refereePercent: clampInt(form.get("refereePercent"), 1, 99, brand.refereePercent),
-      refererPercent: clampInt(form.get("refererPercent"), 1, 99, brand.refererPercent),
-      rewardExpiryDays: clampInt(form.get("rewardExpiryDays"), 1, 365, brand.rewardExpiryDays),
+      enabled: String(form.get("enabled")) === "true",
+      firstPurchaseOnly: eligibility.includes("firstPurchaseOnly"),
+      preventDeviceReuse: eligibility.includes("preventDeviceReuse"),
+      maxReferralsPerUser: nullableInt(form.get("maxReferralsPerUser"), current.maxReferralsPerUser),
+      refereeDiscount: refereeDiscount as unknown as object,
+      referrerDiscount: referrerDiscount as unknown as object,
     },
   });
   return { ok: true };
 };
 
-function clampInt(v: FormDataEntryValue | null, min: number, max: number, fallback: number) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, Math.round(n)));
-}
-
 export default function ReferralAdmin() {
   const data = useLoaderData<LoaderData>();
   const fetcher = useFetcher<typeof action>();
   const shopify = useAppBridge();
-  const saving = fetcher.state === "submitting";
 
   useEffect(() => {
     if (fetcher.data?.ok) shopify.toast.show("Settings saved");
   }, [fetcher.data, shopify]);
 
+  const [refereeType, setRefereeType] = useState<DiscountType>(data.config.refereeDiscount.type);
+  const [referrerType, setReferrerType] = useState<DiscountType>(data.config.referrerDiscount.type);
+
+  const resetUiState = () => {
+    setRefereeType(data.config.refereeDiscount.type);
+    setReferrerType(data.config.referrerDiscount.type);
+  };
+
   return (
-    <s-page heading="Referral">
-      <s-section heading="Program settings">
-        <fetcher.Form method="post">
-          <s-stack direction="block" gap="base">
-            <s-switch
-              label="Program active"
-              name="programActive"
-              {...(data.brand.programActive ? { checked: true } : {})}
-            />
-            <s-number-field
-              label="Friend discount (%)"
-              name="refereePercent"
-              defaultValue={String(data.brand.refereePercent)}
-              min={1}
-              max={99}
-            />
-            <s-number-field
-              label="Referrer reward (%)"
-              name="refererPercent"
-              defaultValue={String(data.brand.refererPercent)}
-              min={1}
-              max={99}
-            />
-            <s-number-field
-              label="Reward expiry (days)"
-              name="rewardExpiryDays"
-              defaultValue={String(data.brand.rewardExpiryDays)}
-              min={1}
-              max={365}
-            />
-            <s-button type="submit" variant="primary" {...(saving ? { loading: true } : {})}>
-              Save
-            </s-button>
-          </s-stack>
-        </fetcher.Form>
-      </s-section>
+    <fetcher.Form method="post" data-save-bar onReset={resetUiState}>
+      <s-page heading="Referral" inlineSize="base">
+        <s-stack direction="block" gap="base" paddingBlockEnd="large">
+          <s-section heading="Referral widget">
+            <s-choice-list
+              name="enabled"
+              label="Status"
+              labelAccessibilityVisibility="exclusive"
+            >
+              <s-choice value="true" {...(data.config.enabled ? { selected: true } : {})}>
+                Enable
+              </s-choice>
+              <s-choice value="false" {...(!data.config.enabled ? { selected: true } : {})}>
+                Disable
+              </s-choice>
+            </s-choice-list>
+          </s-section>
 
-      <s-section heading="Stats" slot="aside">
-        <s-stack direction="block" gap="base">
-          <s-paragraph>Total referrals: <s-text type="strong">{data.stats.total}</s-text></s-paragraph>
-          <s-paragraph>Claimed: <s-text type="strong">{data.stats.claimed}</s-text></s-paragraph>
-          <s-paragraph>Converted: <s-text type="strong">{data.stats.converted}</s-text></s-paragraph>
+          <s-section heading="Friend reward">
+            <s-stack direction="block" gap="base">
+              <s-paragraph>Choose the reward for friends who receive the link</s-paragraph>
+              <s-grid gridTemplateColumns="2fr 1fr" gap="base">
+                <s-select
+                  name="refereeType"
+                  label="Reward type"
+                  labelAccessibilityVisibility="exclusive"
+                  value={refereeType}
+                  onChange={(e: Event) => {
+                    const v = (e.currentTarget as HTMLSelectElement).value;
+                    if (v === "FIXED_AMOUNT" || v === "PERCENT") setRefereeType(v);
+                  }}
+                >
+                  <s-option value="PERCENT">Percentage off</s-option>
+                  <s-option value="FIXED_AMOUNT">Fixed amount</s-option>
+                </s-select>
+                {refereeType === "PERCENT" ? (
+                  <s-number-field
+                    name="refereeAmount"
+                    label="Amount"
+                    labelAccessibilityVisibility="exclusive"
+                    defaultValue={String(data.config.refereeDiscount.amount)}
+                    min={1}
+                    max={100}
+                    step={1}
+                    inputMode="numeric"
+                    suffix="%"
+                  />
+                ) : (
+                  <s-money-field
+                    name="refereeAmount"
+                    label="Amount"
+                    labelAccessibilityVisibility="exclusive"
+                    defaultValue={data.config.refereeDiscount.amount.toFixed(2)}
+                    min={0.01}
+                  />
+                )}
+              </s-grid>
+              <s-number-field
+                name="refereeValidityDays"
+                label="Discount validity"
+                defaultValue={String(Math.max(1, Math.round(data.config.refereeDiscount.validity_seconds / 86400)))}
+                min={1}
+                step={1}
+                inputMode="numeric"
+                suffix="days"
+              />
+              <s-number-field
+                name="refereeMaxUses"
+                label="Max uses (blank = unlimited)"
+                defaultValue={
+                  data.config.refereeDiscount.max_uses == null
+                    ? ""
+                    : String(data.config.refereeDiscount.max_uses)
+                }
+                min={1}
+                inputMode="numeric"
+                placeholder="Unlimited"
+              />
+              <s-money-field
+                name="refereeMinOrder"
+                label="Minimum order amount (0 = none)"
+                defaultValue={(data.config.refereeDiscount.min_order_amount || 0).toFixed(2)}
+                min={0}
+              />
+            </s-stack>
+          </s-section>
+
+          <s-section heading="Customer reward">
+            <s-stack direction="block" gap="base">
+              <s-paragraph>
+                Choose the reward for customers whose friends have made a purchase (optional)
+              </s-paragraph>
+              <s-grid
+                gridTemplateColumns={referrerType === "NONE" ? "1fr" : "2fr 1fr"}
+                gap="base"
+              >
+                <s-select
+                  name="referrerType"
+                  label="Reward type"
+                  labelAccessibilityVisibility="exclusive"
+                  value={referrerType}
+                  onChange={(e: Event) => {
+                    const v = (e.currentTarget as HTMLSelectElement).value;
+                    if (v === "FIXED_AMOUNT" || v === "PERCENT" || v === "NONE") setReferrerType(v);
+                  }}
+                >
+                  <s-option value="PERCENT">Percentage off</s-option>
+                  <s-option value="FIXED_AMOUNT">Fixed amount</s-option>
+                  <s-option value="NONE">No incentive</s-option>
+                </s-select>
+                {referrerType === "PERCENT" && (
+                  <s-number-field
+                    name="referrerAmount"
+                    label="Amount"
+                    labelAccessibilityVisibility="exclusive"
+                    defaultValue={String(data.config.referrerDiscount.amount)}
+                    min={1}
+                    max={100}
+                    step={1}
+                    inputMode="numeric"
+                    suffix="%"
+                  />
+                )}
+                {referrerType === "FIXED_AMOUNT" && (
+                  <s-money-field
+                    name="referrerAmount"
+                    label="Amount"
+                    labelAccessibilityVisibility="exclusive"
+                    defaultValue={data.config.referrerDiscount.amount.toFixed(2)}
+                    min={0.01}
+                  />
+                )}
+              </s-grid>
+              {referrerType !== "NONE" && (
+                <>
+                  <s-number-field
+                    name="referrerValidityDays"
+                    label="Discount validity"
+                    defaultValue={String(Math.max(1, Math.round(data.config.referrerDiscount.validity_seconds / 86400)))}
+                    min={1}
+                    step={1}
+                    inputMode="numeric"
+                    suffix="days"
+                  />
+                  <s-number-field
+                    name="referrerMaxUses"
+                    label="Max uses (blank = unlimited)"
+                    defaultValue={
+                      data.config.referrerDiscount.max_uses == null
+                        ? ""
+                        : String(data.config.referrerDiscount.max_uses)
+                    }
+                    min={1}
+                    inputMode="numeric"
+                    placeholder="Unlimited"
+                  />
+                  <s-money-field
+                    name="referrerMinOrder"
+                    label="Minimum order amount (0 = none)"
+                    defaultValue={(data.config.referrerDiscount.min_order_amount || 0).toFixed(2)}
+                    min={0}
+                  />
+                </>
+              )}
+            </s-stack>
+          </s-section>
+
+          <s-section heading="Eligibility">
+            <s-choice-list
+              name="eligibility"
+              label="Eligibility"
+              labelAccessibilityVisibility="exclusive"
+              multiple
+            >
+              <s-choice
+                value="firstPurchaseOnly"
+                {...(data.config.firstPurchaseOnly ? { selected: true } : {})}
+              >
+                First-time customers only
+              </s-choice>
+              <s-choice
+                value="preventDeviceReuse"
+                {...(data.config.preventDeviceReuse ? { selected: true } : {})}
+              >
+                Prevent same device from reusing a referral link
+              </s-choice>
+            </s-choice-list>
+          </s-section>
+
+          <s-section heading="Limits">
+            <s-number-field
+              name="maxReferralsPerUser"
+              label="Max successful referrals per customer (blank = unlimited)"
+              defaultValue={
+                data.config.maxReferralsPerUser == null
+                  ? ""
+                  : String(data.config.maxReferralsPerUser)
+              }
+              min={1}
+              inputMode="numeric"
+              placeholder="Unlimited"
+            />
+          </s-section>
+
+          <s-section heading="Recent referrals">
+            {data.recent.length === 0 ? (
+              <s-paragraph>No referrals yet.</s-paragraph>
+            ) : (
+              <s-table>
+                <s-table-header-row>
+                  <s-table-header>Friend</s-table-header>
+                  <s-table-header>Referrer</s-table-header>
+                  <s-table-header>Status</s-table-header>
+                  <s-table-header>Created</s-table-header>
+                </s-table-header-row>
+                <s-table-body>
+                  {data.recent.map((r) => (
+                    <s-table-row key={r.id}>
+                      <s-table-cell>{r.friendEmail}</s-table-cell>
+                      <s-table-cell>{r.referrerEmail}</s-table-cell>
+                      <s-table-cell>{r.status}</s-table-cell>
+                      <s-table-cell>{new Date(r.createdAt).toLocaleString()}</s-table-cell>
+                    </s-table-row>
+                  ))}
+                </s-table-body>
+              </s-table>
+            )}
+          </s-section>
         </s-stack>
-      </s-section>
 
-      <s-section heading="Recent referrals">
-        {data.recent.length === 0 ? (
-          <s-paragraph>No referrals yet.</s-paragraph>
-        ) : (
-          <s-table>
-            <s-table-header-row>
-              <s-table-header>Friend</s-table-header>
-              <s-table-header>Referrer</s-table-header>
-              <s-table-header>Status</s-table-header>
-              <s-table-header>Created</s-table-header>
-            </s-table-header-row>
-            <s-table-body>
-              {data.recent.map((r) => (
-                <s-table-row key={r.id}>
-                  <s-table-cell>{r.friendEmail}</s-table-cell>
-                  <s-table-cell>{r.referrerEmail}</s-table-cell>
-                  <s-table-cell>{r.status}</s-table-cell>
-                  <s-table-cell>{new Date(r.createdAt).toLocaleString()}</s-table-cell>
-                </s-table-row>
-              ))}
-            </s-table-body>
-          </s-table>
-        )}
-      </s-section>
-    </s-page>
+        <s-box slot="aside">
+          <s-section heading="Stats">
+            <s-unordered-list>
+              <s-list-item>Total: {data.stats.total}</s-list-item>
+              <s-list-item>Claimed: {data.stats.claimed}</s-list-item>
+              <s-list-item>Converted: {data.stats.converted}</s-list-item>
+            </s-unordered-list>
+          </s-section>
+
+          <s-section heading="Details">
+            <s-unordered-list>
+              <s-list-item>
+                Friend reward: {formatDiscount(data.config.refereeDiscount)}
+              </s-list-item>
+              <s-list-item>
+                Customer reward:{" "}
+                {data.config.referrerDiscount.type === "NONE"
+                  ? "No incentive"
+                  : formatDiscount(data.config.referrerDiscount)}
+              </s-list-item>
+              <s-list-item>
+                {data.config.firstPurchaseOnly
+                  ? "First-time customers only"
+                  : "All customers eligible"}
+              </s-list-item>
+              <s-list-item>
+                {data.config.preventDeviceReuse
+                  ? "Device reuse blocked"
+                  : "Device reuse allowed"}
+              </s-list-item>
+            </s-unordered-list>
+          </s-section>
+        </s-box>
+      </s-page>
+    </fetcher.Form>
   );
+}
+
+function formatDiscount(d: DiscountConfig): string {
+  if (d.type === "NONE") return "No incentive";
+  const amount = d.type === "PERCENT" ? `${d.amount}%` : `$${d.amount.toFixed(2)}`;
+  return `${amount} off`;
 }
 
 export const headers: HeadersFunction = (headersArgs) => {

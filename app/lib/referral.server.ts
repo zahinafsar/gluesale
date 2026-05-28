@@ -1,47 +1,33 @@
 import prisma from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import { sendEmail } from "./resend.server";
-import { generateDiscountCode, generateReferralCode, hashIp } from "./code.server";
-import {
-  createPercentDiscountCode,
-  findCustomerByEmail,
-} from "./shopify-admin.server";
+import { generateDiscountCode, hashIp } from "./code.server";
+import { createDiscountCode, findCustomerByEmail } from "./shopify-admin.server";
 import { RefereeCodeEmail } from "../emails/RefereeCodeEmail";
 import { ReferrerRewardEmail } from "../emails/ReferrerRewardEmail";
-import type { Brand, Referrer, Referral } from "@prisma/client";
+import { getOrCreateBrand, getOrCreateCustomer, getOrCreateReferee } from "./customer.server";
+import { getReferralConfig } from "./feature.server";
+import { parseDiscountConfig } from "./discount-config";
 
 const norm = (s: string) => s.trim().toLowerCase();
 
-export async function getOrCreateBrand(shop: string): Promise<Brand> {
-  return prisma.brand.upsert({
-    where: { shop },
-    create: { shop },
-    update: {},
-  });
-}
-
-export async function getOrCreateReferrer(
-  brand: Brand,
-  input: { email: string; shopifyCustomerId?: string | null },
-): Promise<Referrer> {
-  const email = norm(input.email);
-  return prisma.referrer.upsert({
-    where: { brandId_email: { brandId: brand.id, email } },
-    create: {
-      brandId: brand.id,
-      email,
-      shopifyCustomerId: input.shopifyCustomerId ?? undefined,
-      code: generateReferralCode(12),
-    },
-    update: {
-      shopifyCustomerId: input.shopifyCustomerId ?? undefined,
-    },
-  });
-}
+export { getOrCreateBrand };
 
 export type ClaimResult =
   | { ok: true; refereeCode: string; redirectUrl: string }
-  | { ok: false; reason: "self" | "existing" | "duplicate" | "invalid_code" | "program_off" | "error"; message: string };
+  | {
+      ok: false;
+      reason:
+        | "self"
+        | "existing"
+        | "duplicate"
+        | "invalid_code"
+        | "program_off"
+        | "device_reuse"
+        | "limit_reached"
+        | "error";
+      message: string;
+    };
 
 export async function claimReferral(args: {
   shop: string;
@@ -54,19 +40,26 @@ export async function claimReferral(args: {
   if (!/^.+@.+\..+$/.test(friendEmail))
     return { ok: false, reason: "error", message: "Invalid email" };
 
-  const brand = await prisma.brand.findUnique({ where: { shop: args.shop } });
-  if (!brand || !brand.programActive)
+  const brand = await getOrCreateBrand(args.shop);
+  const config = await getReferralConfig(brand);
+  if (!config.enabled)
     return { ok: false, reason: "program_off", message: "Referral program not active" };
 
-  const referrer = await prisma.referrer.findUnique({ where: { code: args.referrerCode } });
-  if (!referrer || referrer.brandId !== brand.id)
+  const referrer = await prisma.referrer.findUnique({
+    where: { code: args.referrerCode },
+    include: { customer: true },
+  });
+  if (!referrer || referrer.referralConfigId !== config.id)
     return { ok: false, reason: "invalid_code", message: "Unknown referral code" };
 
-  if (norm(referrer.email) === friendEmail)
+  if (norm(referrer.customer.email) === friendEmail)
     return { ok: false, reason: "self", message: "You can't refer yourself" };
 
+  const friendCustomer = await getOrCreateCustomer(brand, { email: friendEmail });
+  const friendReferee = await getOrCreateReferee(config, friendCustomer);
+
   const existingClaim = await prisma.referral.findUnique({
-    where: { brandId_friendEmail: { brandId: brand.id, friendEmail } },
+    where: { refereeId: friendReferee.id },
   });
   if (existingClaim)
     return {
@@ -75,49 +68,95 @@ export async function claimReferral(args: {
       message: "This email has already claimed a referral",
     };
 
-  const { admin } = await unauthenticated.admin(args.shop);
-  const existingCustomer = await findCustomerByEmail(admin.graphql, friendEmail);
-  if (existingCustomer && existingCustomer.numberOfOrders > 0) {
-    await prisma.referral.create({
-      data: {
-        brandId: brand.id,
-        referrerId: referrer.id,
-        friendEmail,
-        status: "REJECTED_EXISTING",
-        ipHash: hashIp(args.ip),
-        userAgent: args.userAgent ?? undefined,
-      },
+  const ipHash = hashIp(args.ip);
+
+  if (config.preventDeviceReuse && ipHash) {
+    const sameDevice = await prisma.referral.findFirst({
+      where: { referrerId: referrer.id, ipHash },
     });
-    return {
-      ok: false,
-      reason: "existing",
-      message: "This email belongs to an existing customer",
-    };
+    if (sameDevice) {
+      await prisma.referral.create({
+        data: {
+          referralConfigId: config.id,
+          referrerId: referrer.id,
+          refereeId: friendReferee.id,
+          status: "REJECTED_FRAUD",
+          ipHash,
+          userAgent: args.userAgent ?? undefined,
+        },
+      });
+      return {
+        ok: false,
+        reason: "device_reuse",
+        message: "This device has already used this referral link",
+      };
+    }
   }
 
+  if (config.maxReferralsPerUser != null) {
+    const convertedCount = await prisma.referral.count({
+      where: { referrerId: referrer.id, status: "CONVERTED" },
+    });
+    if (convertedCount >= config.maxReferralsPerUser)
+      return {
+        ok: false,
+        reason: "limit_reached",
+        message: "This referrer has reached their referral limit",
+      };
+  }
+
+  const { admin } = await unauthenticated.admin(args.shop);
+
+  if (config.firstPurchaseOnly) {
+    const existingCustomer = await findCustomerByEmail(admin.graphql, friendEmail);
+    if (existingCustomer && existingCustomer.numberOfOrders > 0) {
+      await prisma.referral.create({
+        data: {
+          referralConfigId: config.id,
+          referrerId: referrer.id,
+          refereeId: friendReferee.id,
+          status: "REJECTED_EXISTING",
+          ipHash,
+          userAgent: args.userAgent ?? undefined,
+        },
+      });
+      return {
+        ok: false,
+        reason: "existing",
+        message: "This email belongs to an existing customer",
+      };
+    }
+  }
+
+  const d = parseDiscountConfig(config.refereeDiscount);
   const code = generateDiscountCode("REF");
   const startsAt = new Date();
-  const endsAt = new Date(Date.now() + brand.rewardExpiryDays * 24 * 60 * 60 * 1000);
+  const endsAt = new Date(startsAt.getTime() + d.validity_seconds * 1000);
 
-  const { nodeId } = await createPercentDiscountCode(admin.graphql, {
+  const { nodeId } = await createDiscountCode(admin.graphql, {
     title: `Referral discount for ${friendEmail}`,
     code,
-    percent: brand.refereePercent,
+    type: d.type,
+    amount: d.amount,
     startsAt,
     endsAt,
-    usageLimit: brand.refereeMaxUses,
+    usageLimit: d.max_uses,
+    minOrderAmount: d.min_order_amount,
     appliesOncePerCustomer: true,
+  });
+
+  const discount = await prisma.discount.create({
+    data: { shopifyCodeId: nodeId, code },
   });
 
   await prisma.referral.create({
     data: {
-      brandId: brand.id,
+      referralConfigId: config.id,
       referrerId: referrer.id,
-      friendEmail,
-      refereeCodeId: nodeId,
-      refereeCode: code,
+      refereeId: friendReferee.id,
+      refereeDiscountId: discount.id,
       status: "CLAIMED",
-      ipHash: hashIp(args.ip),
+      ipHash,
       userAgent: args.userAgent ?? undefined,
     },
   });
@@ -129,9 +168,13 @@ export async function claimReferral(args: {
       react: RefereeCodeEmail({
         shop: args.shop,
         code,
-        percent: brand.refereePercent,
+        percent: d.amount,
         expiresAt: endsAt,
       }),
+    });
+    await prisma.discount.update({
+      where: { id: discount.id },
+      data: { emailedAt: new Date() },
     });
   } catch (e) {
     console.error("[referral] send referee email failed", e);
@@ -155,34 +198,60 @@ export async function convertReferral(args: {
   const orderEmail = norm(args.order.email ?? "");
   if (!orderEmail) return { rewarded: false, reason: "no_email" };
 
+  const brand = await getOrCreateBrand(args.shop);
+  const config = await getReferralConfig(brand);
+  if (!config.enabled) return { rewarded: false, reason: "program_off" };
+
   const attrCode = args.order.note_attributes?.find(
     (a) => a.name === "_referral_code" || a.name === "referral_code",
   )?.value;
   const codeFromAttr = attrCode ? attrCode.trim() : null;
   const codeFromDiscount = args.order.discount_codes?.[0]?.code ?? null;
 
-  const referral = await prisma.referral.findFirst({
-    where: {
-      brand: { shop: args.shop },
-      friendEmail: orderEmail,
-      status: "CLAIMED",
-      ...(codeFromAttr || codeFromDiscount
-        ? {
-            OR: [
-              codeFromAttr ? { refereeCode: codeFromAttr } : undefined,
-              codeFromDiscount ? { refereeCode: codeFromDiscount } : undefined,
-            ].filter(Boolean) as { refereeCode: string }[],
-          }
-        : {}),
-    },
-    include: { referrer: { include: { brand: true } } },
-  });
-  if (!referral) return { rewarded: false, reason: "no_match" };
+  type FoundReferral = NonNullable<
+    Awaited<ReturnType<typeof prisma.referral.findUnique>>
+  > & {
+    referrer: NonNullable<Awaited<ReturnType<typeof prisma.referrer.findUnique>>> & {
+      customer: NonNullable<Awaited<ReturnType<typeof prisma.customer.findUnique>>>;
+    };
+  };
+  let referral: FoundReferral | null = null;
+
+  const codeCandidate = codeFromAttr || codeFromDiscount;
+  if (codeCandidate) {
+    const discount = await prisma.discount.findUnique({
+      where: { code: codeCandidate },
+      include: {
+        refereeFor: {
+          include: { referrer: { include: { customer: true } } },
+        },
+      },
+    });
+    referral = (discount?.refereeFor as FoundReferral | undefined) ?? null;
+  }
+
+  if (!referral) {
+    const friendCustomer = await prisma.customer.findUnique({
+      where: { brandId_email: { brandId: brand.id, email: orderEmail } },
+      include: {
+        asReferee: {
+          include: {
+            referral: {
+              include: { referrer: { include: { customer: true } } },
+            },
+          },
+        },
+      },
+    });
+    referral = (friendCustomer?.asReferee?.referral as FoundReferral | undefined) ?? null;
+  }
+
+  if (!referral || referral.status !== "CLAIMED")
+    return { rewarded: false, reason: "no_match" };
 
   const referrer = referral.referrer;
-  const brand = referrer.brand;
 
-  if (norm(referrer.email) === orderEmail) {
+  if (norm(referrer.customer.email) === orderEmail) {
     await prisma.referral.update({
       where: { id: referral.id },
       data: { status: "REJECTED_SELF" },
@@ -190,61 +259,75 @@ export async function convertReferral(args: {
     return { rewarded: false, reason: "self_referral" };
   }
 
-  const customerOrderCount =
-    typeof args.order.customer?.numberOfOrders === "string"
-      ? parseInt(args.order.customer.numberOfOrders, 10)
-      : args.order.customer?.numberOfOrders ?? 1;
-  if (customerOrderCount > 1) {
+  if (config.firstPurchaseOnly) {
+    const customerOrderCount =
+      typeof args.order.customer?.numberOfOrders === "string"
+        ? parseInt(args.order.customer.numberOfOrders, 10)
+        : args.order.customer?.numberOfOrders ?? 1;
+    if (customerOrderCount > 1) {
+      await prisma.referral.update({
+        where: { id: referral.id },
+        data: { status: "REJECTED_EXISTING" },
+      });
+      return { rewarded: false, reason: "not_first_order" };
+    }
+  }
+
+  const d = parseDiscountConfig(config.referrerDiscount);
+
+  if (d.type === "NONE") {
     await prisma.referral.update({
       where: { id: referral.id },
-      data: { status: "REJECTED_EXISTING" },
+      data: { status: "CONVERTED", convertedAt: new Date(), orderId: args.order.id },
     });
-    return { rewarded: false, reason: "not_first_order" };
+    return { rewarded: true, reason: "no_incentive" };
   }
 
   const { admin } = await unauthenticated.admin(args.shop);
   const startsAt = new Date();
-  const endsAt = new Date(Date.now() + brand.rewardExpiryDays * 24 * 60 * 60 * 1000);
+  const endsAt = new Date(startsAt.getTime() + d.validity_seconds * 1000);
   const rewardCode = generateDiscountCode("THANKS");
 
-  const { nodeId } = await createPercentDiscountCode(admin.graphql, {
-    title: `Referrer reward for ${referrer.email}`,
+  const { nodeId } = await createDiscountCode(admin.graphql, {
+    title: `Referrer reward for ${referrer.customer.email}`,
     code: rewardCode,
-    percent: brand.refererPercent,
+    type: d.type,
+    amount: d.amount,
     startsAt,
     endsAt,
-    usageLimit: 1,
+    usageLimit: d.max_uses,
+    minOrderAmount: d.min_order_amount,
     appliesOncePerCustomer: true,
   });
 
-  const reward = await prisma.reward.create({
-    data: {
-      referrerId: referrer.id,
-      referralId: referral.id,
-      shopifyCodeId: nodeId,
-      code: rewardCode,
-    },
+  const discount = await prisma.discount.create({
+    data: { shopifyCodeId: nodeId, code: rewardCode },
   });
 
   await prisma.referral.update({
     where: { id: referral.id },
-    data: { status: "CONVERTED", convertedAt: new Date(), orderId: args.order.id },
+    data: {
+      status: "CONVERTED",
+      convertedAt: new Date(),
+      orderId: args.order.id,
+      referrerDiscountId: discount.id,
+    },
   });
 
   try {
     await sendEmail({
-      to: referrer.email,
+      to: referrer.customer.email,
       subject: `Your referral reward at ${args.shop.replace(/\.myshopify\.com$/, "")}`,
       entityRefId: args.order.id,
       react: ReferrerRewardEmail({
         shop: args.shop,
         code: rewardCode,
-        percent: brand.refererPercent,
+        percent: d.amount,
         expiresAt: endsAt,
       }),
     });
-    await prisma.reward.update({
-      where: { id: reward.id },
+    await prisma.discount.update({
+      where: { id: discount.id },
       data: { emailedAt: new Date() },
     });
   } catch (e) {

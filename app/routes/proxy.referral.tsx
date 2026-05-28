@@ -3,12 +3,14 @@ import { data, redirect, useActionData, useLoaderData } from "react-router";
 import { verifyAppProxySignature } from "../lib/proxy.server";
 import prisma from "../db.server";
 import { claimReferral } from "../lib/referral.server";
+import { getReferralConfig } from "../lib/feature.server";
+import { parseDiscountConfig } from "../lib/discount-config";
 
 type LoaderData = {
   shop: string;
   code: string;
   brandName: string;
-  refereePercent: number;
+  discountLabel: string;
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -21,18 +23,26 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (!shop || !code) throw new Response("Missing shop or code", { status: 400 });
 
   const brand = await prisma.brand.findUnique({ where: { shop } });
-  if (!brand || !brand.programActive)
+  if (!brand) throw new Response("Referral program not active", { status: 404 });
+  const config = await getReferralConfig(brand);
+  if (!config.enabled)
     throw new Response("Referral program not active", { status: 404 });
 
   const referrer = await prisma.referrer.findUnique({ where: { code } });
-  if (!referrer || referrer.brandId !== brand.id)
+  if (!referrer || referrer.referralConfigId !== config.id)
     throw new Response("Unknown referral code", { status: 404 });
+
+  const refereeDiscount = parseDiscountConfig(config.refereeDiscount);
+  const discountLabel =
+    refereeDiscount.type === "PERCENT"
+      ? `${refereeDiscount.amount}% off`
+      : `$${refereeDiscount.amount.toFixed(2)} off`;
 
   return data<LoaderData>({
     shop,
     code,
     brandName: shop.replace(/\.myshopify\.com$/, ""),
-    refereePercent: brand.refereePercent,
+    discountLabel,
   });
 };
 
@@ -75,12 +85,12 @@ export default function ReferralProxyPage() {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width,initial-scale=1" />
-        <title>{`${view.refereePercent}% off at ${view.brandName}`}</title>
+        <title>{`${view.discountLabel} at ${view.brandName}`}</title>
         <style>{baseCss}</style>
       </head>
       <body>
         <main className="card">
-          <h1>{`Get ${view.refereePercent}% off`}</h1>
+          <h1>{`Get ${view.discountLabel}`}</h1>
           <p>
             A friend invited you to shop at <strong>{view.brandName}</strong>. Drop your email
             below to reveal your one-time discount.

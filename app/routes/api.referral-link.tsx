@@ -1,7 +1,14 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { data } from "react-router";
 import { authenticate } from "../shopify.server";
-import { buildShareLink, getOrCreateBrand, getOrCreateReferrer } from "../lib/referral.server";
+import { buildShareLink } from "../lib/referral.server";
+import {
+  getOrCreateBrand,
+  getOrCreateCustomer,
+  getOrCreateReferrer,
+} from "../lib/customer.server";
+import { getReferralConfig } from "../lib/feature.server";
+import { parseDiscountConfig } from "../lib/discount-config";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.public.appProxy(request);
@@ -14,14 +21,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (!email) return data({ error: "Missing email" }, { status: 400 });
 
   const brand = await getOrCreateBrand(shop);
-  if (!brand.programActive) return data({ active: false });
+  const config = await getReferralConfig(brand);
+  if (!config.enabled) return data({ active: false });
 
-  const referrer = await getOrCreateReferrer(brand, { email, shopifyCustomerId: customerId });
+  const customer = await getOrCreateCustomer(brand, { email, shopifyCustomerId: customerId });
+  const referrer = await getOrCreateReferrer(config, customer);
+
+  const refereeDiscount = parseDiscountConfig(config.refereeDiscount);
+  const referrerDiscount = parseDiscountConfig(config.referrerDiscount);
+
   return data({
     active: true,
     code: referrer.code,
     url: buildShareLink({ shop, code: referrer.code }),
-    refereePercent: brand.refereePercent,
-    refererPercent: brand.refererPercent,
+    refereeDiscount,
+    referrerDiscount,
   });
 };

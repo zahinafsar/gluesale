@@ -1,9 +1,13 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
-import { convertReferral, getOrCreateBrand, getOrCreateReferrer, buildShareLink } from "../lib/referral.server";
+import { convertReferral, buildShareLink } from "../lib/referral.server";
+import { getOrCreateBrand, getOrCreateCustomer, getOrCreateReferrer } from "../lib/customer.server";
+import { getReferralConfig } from "../lib/feature.server";
+import { parseDiscountConfig } from "../lib/discount-config";
 import { sendEmail } from "../lib/resend.server";
 import { ReferrerInviteEmail } from "../emails/ReferrerInviteEmail";
+import { recordWebhook } from "../lib/webhook.server";
 
 type OrderPayload = {
   id: number;
@@ -22,16 +26,11 @@ type OrderPayload = {
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { shop, topic, payload, webhookId } = await authenticate.webhook(request);
+  const { shop, topic, payload, webhookId, apiVersion } = await authenticate.webhook(request);
   if (!webhookId) return new Response("Missing webhook id", { status: 400 });
 
-  try {
-    await prisma.processedWebhook.create({
-      data: { id: webhookId, topic, shop },
-    });
-  } catch {
-    return new Response();
-  }
+  const { duplicate } = await recordWebhook({ webhookId, topic, shop, apiVersion, payload });
+  if (duplicate) return new Response();
 
   const order = payload as OrderPayload;
   const customerOrdersCount =
@@ -61,28 +60,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (isFirstOrder && order.email) {
     try {
       const brand = await getOrCreateBrand(shop);
-      if (brand.programActive) {
-        const referrer = await getOrCreateReferrer(brand, {
+      const config = await getReferralConfig(brand);
+      if (config.enabled) {
+        const customer = await getOrCreateCustomer(brand, {
           email: order.email,
-          shopifyCustomerId: order.customer?.admin_graphql_api_id,
+          shopifyCustomerId: order.customer?.admin_graphql_api_id ?? null,
         });
-        if (!referrer.firstOrderId) {
-          await prisma.referrer.update({
-            where: { id: referrer.id },
-            data: { firstOrderId: orderId },
-          });
+        const referrer = await getOrCreateReferrer(config, customer);
+        if (!referrer.welcomeEmailedAt) {
           const shareUrl = buildShareLink({ shop, code: referrer.code });
           const storeName = shop.replace(/\.myshopify\.com$/, "");
+          const refereeDiscount = parseDiscountConfig(config.refereeDiscount);
+          const referrerDiscount = parseDiscountConfig(config.referrerDiscount);
           await sendEmail({
-            to: referrer.email,
+            to: customer.email,
             subject: `Your referral link for ${storeName}`,
             entityRefId: String(order.id),
             react: ReferrerInviteEmail({
               shop,
               shareUrl,
-              refereePercent: brand.refereePercent,
-              refererPercent: brand.refererPercent,
+              refereePercent: refereeDiscount.amount,
+              refererPercent: referrerDiscount.amount,
             }),
+          });
+          await prisma.referrer.update({
+            where: { id: referrer.id },
+            data: { welcomeEmailedAt: new Date() },
           });
         }
       }

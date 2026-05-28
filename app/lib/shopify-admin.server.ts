@@ -1,4 +1,5 @@
 import type { AdminApiContext } from "@shopify/shopify-app-react-router/server";
+import type { DiscountType } from "./discount-config";
 
 export type AdminClient = AdminApiContext["graphql"];
 
@@ -27,22 +28,54 @@ export async function findCustomerByEmail(
   return { id: node.id, email: node.email, numberOfOrders: Number.isFinite(count) ? count : 0 };
 }
 
-export async function createPercentDiscountCode(
+export async function createDiscountCode(
   graphql: AdminClient,
   opts: {
     title: string;
     code: string;
-    percent: number;
+    type: DiscountType;
+    amount: number;
     startsAt: Date;
     endsAt: Date;
-    usageLimit?: number;
+    usageLimit: number | null;
+    minOrderAmount: number;
     appliesOncePerCustomer?: boolean;
-    customerEmails?: string[];
   },
 ): Promise<{ nodeId: string }> {
-  const customerSelection = opts.customerEmails?.length
-    ? { customers: { add: [] as string[] } }
-    : { all: true };
+  if (opts.type === "NONE") {
+    throw new Error("createDiscountCode called with type=NONE");
+  }
+  const customerGets =
+    opts.type === "PERCENT"
+      ? { value: { percentage: opts.amount / 100 }, items: { all: true } }
+      : {
+          value: {
+            discountAmount: { amount: opts.amount.toFixed(2), appliesOnEachItem: false },
+          },
+          items: { all: true },
+        };
+
+  const input: Record<string, unknown> = {
+    title: opts.title,
+    code: opts.code,
+    startsAt: opts.startsAt.toISOString(),
+    endsAt: opts.endsAt.toISOString(),
+    appliesOncePerCustomer: opts.appliesOncePerCustomer ?? true,
+    customerSelection: { all: true },
+    customerGets,
+    combinesWith: {
+      orderDiscounts: false,
+      productDiscounts: true,
+      shippingDiscounts: true,
+    },
+  };
+
+  if (opts.usageLimit !== null) input.usageLimit = opts.usageLimit;
+  if (opts.minOrderAmount > 0) {
+    input.minimumRequirement = {
+      subtotal: { greaterThanOrEqualToSubtotal: opts.minOrderAmount.toFixed(2) },
+    };
+  }
 
   const resp = await graphql(
     `#graphql
@@ -52,28 +85,7 @@ export async function createPercentDiscountCode(
         userErrors { field message code }
       }
     }`,
-    {
-      variables: {
-        input: {
-          title: opts.title,
-          code: opts.code,
-          startsAt: opts.startsAt.toISOString(),
-          endsAt: opts.endsAt.toISOString(),
-          appliesOncePerCustomer: opts.appliesOncePerCustomer ?? true,
-          usageLimit: opts.usageLimit ?? 1,
-          customerSelection,
-          customerGets: {
-            value: { percentage: opts.percent / 100 },
-            items: { all: true },
-          },
-          combinesWith: {
-            orderDiscounts: false,
-            productDiscounts: true,
-            shippingDiscounts: true,
-          },
-        },
-      },
-    },
+    { variables: { input } },
   );
   const json = (await resp.json()) as {
     data?: {
