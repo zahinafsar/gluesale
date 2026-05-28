@@ -12,31 +12,41 @@ import {
 type Props = {
   shop: string;
   code: string;
-  percent: number;
-  expiresAt: Date;
+  label: string;
+  conditions: string[];
 };
 
-export function ReferrerRewardEmail({ shop, code, percent, expiresAt }: Props) {
+export function ReferrerRewardEmail({ shop, code, label, conditions }: Props) {
   const url = `https://${shop}/discount/${encodeURIComponent(code)}?redirect=/`;
   const storeName = shop.replace(/\.myshopify\.com$/, "");
   return (
     <Html>
       <Head />
-      <Preview>{`Your referral reward at ${storeName}`}</Preview>
+      <Preview>{`Your friend used your referral at ${storeName}`}</Preview>
       <Body style={body}>
         <Container style={container}>
           <Text style={brand}>{storeName}</Text>
           <Hr style={hr} />
-          <Text style={heading}>You earned a reward</Text>
+          <Text style={heading}>Your friend used your referral</Text>
           <Text style={p}>
-            Your friend just shopped. Enjoy <strong style={pct}>{percent}%</strong> off your next
-            order at {storeName} with code <strong style={pct}>{code}</strong>.
+            Hi, your friend just used your referral link and completed their order. Your next order
+            at {storeName} gets <strong style={pct}>{label}</strong> with code{" "}
+            <strong style={pct}>{code}</strong>.
           </Text>
           <Section style={linkBox}>
             <Text style={linkLabel}>Your link</Text>
             <Text style={linkText}>{url}</Text>
           </Section>
-          <Text style={muted}>One-time use. Expires {expiresAt.toLocaleDateString()}.</Text>
+          {conditions.length > 0 && (
+            <Section style={termsBox}>
+              <Text style={termsTitle}>Terms &amp; conditions</Text>
+              {conditions.map((c) => (
+                <Text key={c} style={termsItem}>
+                  • {c}
+                </Text>
+              ))}
+            </Section>
+          )}
         </Container>
       </Body>
     </Html>
@@ -53,6 +63,8 @@ const pct = { color: "#1f2328", fontWeight: 700 };
 const linkBox = { background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, padding: 12, margin: "0 0 16px" };
 const linkLabel = { fontSize: 12, color: "#6b7280", margin: "0 0 4px" };
 const linkText = { fontSize: 14, color: "#0a58ca", margin: 0, wordBreak: "break-all" as const };
-const muted = { color: "#6b7280", fontSize: 12, margin: 0, lineHeight: "18px" };
+const termsBox = { margin: "0 0 16px" };
+const termsTitle = { fontSize: 12, fontWeight: 600, color: "#6b7280", margin: "0 0 6px" };
+const termsItem = { fontSize: 12, color: "#6b7280", margin: "0 0 2px", lineHeight: "18px" };
 
 export default ReferrerRewardEmail;

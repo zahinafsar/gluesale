@@ -22,7 +22,6 @@ type LoaderData = {
   config: {
     enabled: boolean;
     firstPurchaseOnly: boolean;
-    preventDeviceReuse: boolean;
     maxReferralsPerUser: number | null;
     refereeDiscount: DiscountConfig;
     referrerDiscount: DiscountConfig;
@@ -30,7 +29,7 @@ type LoaderData = {
   stats: { total: number; claimed: number; converted: number };
   recent: Array<{
     id: string;
-    friendEmail: string;
+    friendEmail: string | null;
     referrerEmail: string;
     status: string;
     createdAt: string;
@@ -62,7 +61,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     config: {
       enabled: config.enabled,
       firstPurchaseOnly: config.firstPurchaseOnly,
-      preventDeviceReuse: config.preventDeviceReuse,
       maxReferralsPerUser: config.maxReferralsPerUser,
       refereeDiscount: parseDiscountConfig(config.refereeDiscount),
       referrerDiscount: parseDiscountConfig(config.referrerDiscount),
@@ -70,7 +68,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     stats: { total, claimed, converted },
     recent: recent.map((r) => ({
       id: r.id,
-      friendEmail: r.referee.customer.email,
+      friendEmail: r.referee?.customer.email ?? null,
       referrerEmail: r.referrer.customer.email,
       status: r.status,
       createdAt: r.createdAt.toISOString(),
@@ -109,25 +107,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     String(form.get("refereeType")) === "FIXED_AMOUNT" ? "FIXED_AMOUNT" : "PERCENT";
   const refereeAmount = Math.max(0.01, numOr(form.get("refereeAmount"), currentReferee.amount));
 
-  const referrerTypeRaw = String(form.get("referrerType"));
   const referrerType: DiscountType =
-    referrerTypeRaw === "FIXED_AMOUNT"
-      ? "FIXED_AMOUNT"
-      : referrerTypeRaw === "NONE"
-        ? "NONE"
-        : "PERCENT";
-  const referrerAmount =
-    referrerType === "NONE"
-      ? currentReferrer.amount
-      : Math.max(0.01, numOr(form.get("referrerAmount"), currentReferrer.amount));
+    String(form.get("referrerType")) === "FIXED_AMOUNT" ? "FIXED_AMOUNT" : "PERCENT";
+  const referrerAmount = Math.max(0.01, numOr(form.get("referrerAmount"), currentReferrer.amount));
 
   const refereeDiscount: DiscountConfig = {
     type: refereeType,
     amount: refereeType === "PERCENT" ? Math.min(100, Math.max(1, refereeAmount)) : refereeAmount,
     validity_seconds:
       Math.max(1, intOr(form.get("refereeValidityDays"), Math.round(currentReferee.validity_seconds / 86400))) * 86400,
-    max_uses: nullableInt(form.get("refereeMaxUses"), currentReferee.max_uses),
-    min_order_amount: Math.max(0, numOr(form.get("refereeMinOrder"), currentReferee.min_order_amount)),
+    max_uses: 1,
+    min_order_amount:
+      form.get("refereeMinOrderOn") === "on"
+        ? Math.max(0, numOr(form.get("refereeMinOrder"), currentReferee.min_order_amount))
+        : 0,
   };
 
   const referrerDiscount: DiscountConfig = {
@@ -135,8 +128,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     amount: referrerType === "PERCENT" ? Math.min(100, Math.max(1, referrerAmount)) : referrerAmount,
     validity_seconds:
       Math.max(1, intOr(form.get("referrerValidityDays"), Math.round(currentReferrer.validity_seconds / 86400))) * 86400,
-    max_uses: nullableInt(form.get("referrerMaxUses"), currentReferrer.max_uses),
-    min_order_amount: Math.max(0, numOr(form.get("referrerMinOrder"), currentReferrer.min_order_amount)),
+    max_uses: 1,
+    min_order_amount:
+      form.get("referrerMinOrderOn") === "on"
+        ? Math.max(0, numOr(form.get("referrerMinOrder"), currentReferrer.min_order_amount))
+        : 0,
   };
 
   const eligibility = form.getAll("eligibility").map(String);
@@ -146,8 +142,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     data: {
       enabled: String(form.get("enabled")) === "true",
       firstPurchaseOnly: eligibility.includes("firstPurchaseOnly"),
-      preventDeviceReuse: eligibility.includes("preventDeviceReuse"),
-      maxReferralsPerUser: nullableInt(form.get("maxReferralsPerUser"), current.maxReferralsPerUser),
+      maxReferralsPerUser:
+        form.get("limitReferralsOn") === "on"
+          ? nullableInt(form.get("maxReferralsPerUser"), current.maxReferralsPerUser)
+          : null,
       refereeDiscount: refereeDiscount as unknown as object,
       referrerDiscount: referrerDiscount as unknown as object,
     },
@@ -166,10 +164,16 @@ export default function ReferralAdmin() {
 
   const [refereeType, setRefereeType] = useState<DiscountType>(data.config.refereeDiscount.type);
   const [referrerType, setReferrerType] = useState<DiscountType>(data.config.referrerDiscount.type);
+  const [refereeMinOrderOn, setRefereeMinOrderOn] = useState(data.config.refereeDiscount.min_order_amount > 0);
+  const [referrerMinOrderOn, setReferrerMinOrderOn] = useState(data.config.referrerDiscount.min_order_amount > 0);
+  const [limitReferralsOn, setLimitReferralsOn] = useState(data.config.maxReferralsPerUser != null);
 
   const resetUiState = () => {
     setRefereeType(data.config.refereeDiscount.type);
     setReferrerType(data.config.referrerDiscount.type);
+    setRefereeMinOrderOn(data.config.refereeDiscount.min_order_amount > 0);
+    setReferrerMinOrderOn(data.config.referrerDiscount.min_order_amount > 0);
+    setLimitReferralsOn(data.config.maxReferralsPerUser != null);
   };
 
   return (
@@ -239,36 +243,35 @@ export default function ReferralAdmin() {
                 inputMode="numeric"
                 suffix="days"
               />
-              <s-number-field
-                name="refereeMaxUses"
-                label="Max uses (blank = unlimited)"
-                defaultValue={
-                  data.config.refereeDiscount.max_uses == null
-                    ? ""
-                    : String(data.config.refereeDiscount.max_uses)
-                }
-                min={1}
-                inputMode="numeric"
-                placeholder="Unlimited"
-              />
-              <s-money-field
-                name="refereeMinOrder"
-                label="Minimum order amount (0 = none)"
-                defaultValue={(data.config.refereeDiscount.min_order_amount || 0).toFixed(2)}
-                min={0}
-              />
+              <s-stack direction="block" gap="small-200">
+                <s-checkbox
+                  name="refereeMinOrderOn"
+                  value="on"
+                  label="Set minimum order amount"
+                  {...(refereeMinOrderOn ? { checked: true } : {})}
+                  onChange={(e: Event) =>
+                    setRefereeMinOrderOn((e.currentTarget as HTMLInputElement).checked)
+                  }
+                />
+                {refereeMinOrderOn && (
+                  <s-money-field
+                    name="refereeMinOrder"
+                    label="Minimum order amount"
+                    labelAccessibilityVisibility="exclusive"
+                    defaultValue={(data.config.refereeDiscount.min_order_amount || 0).toFixed(2)}
+                    min={0}
+                  />
+                )}
+              </s-stack>
             </s-stack>
           </s-section>
 
           <s-section heading="Customer reward">
             <s-stack direction="block" gap="base">
               <s-paragraph>
-                Choose the reward for customers whose friends have made a purchase (optional)
+                Choose the reward for customers whose friends have made a purchase
               </s-paragraph>
-              <s-grid
-                gridTemplateColumns={referrerType === "NONE" ? "1fr" : "2fr 1fr"}
-                gap="base"
-              >
+              <s-grid gridTemplateColumns="2fr 1fr" gap="base">
                 <s-select
                   name="referrerType"
                   label="Reward type"
@@ -276,12 +279,11 @@ export default function ReferralAdmin() {
                   value={referrerType}
                   onChange={(e: Event) => {
                     const v = (e.currentTarget as HTMLSelectElement).value;
-                    if (v === "FIXED_AMOUNT" || v === "PERCENT" || v === "NONE") setReferrerType(v);
+                    if (v === "FIXED_AMOUNT" || v === "PERCENT") setReferrerType(v);
                   }}
                 >
                   <s-option value="PERCENT">Percentage off</s-option>
                   <s-option value="FIXED_AMOUNT">Fixed amount</s-option>
-                  <s-option value="NONE">No incentive</s-option>
                 </s-select>
                 {referrerType === "PERCENT" && (
                   <s-number-field
@@ -306,37 +308,35 @@ export default function ReferralAdmin() {
                   />
                 )}
               </s-grid>
-              {referrerType !== "NONE" && (
-                <>
-                  <s-number-field
-                    name="referrerValidityDays"
-                    label="Discount validity"
-                    defaultValue={String(Math.max(1, Math.round(data.config.referrerDiscount.validity_seconds / 86400)))}
-                    min={1}
-                    step={1}
-                    inputMode="numeric"
-                    suffix="days"
-                  />
-                  <s-number-field
-                    name="referrerMaxUses"
-                    label="Max uses (blank = unlimited)"
-                    defaultValue={
-                      data.config.referrerDiscount.max_uses == null
-                        ? ""
-                        : String(data.config.referrerDiscount.max_uses)
-                    }
-                    min={1}
-                    inputMode="numeric"
-                    placeholder="Unlimited"
-                  />
+              <s-number-field
+                name="referrerValidityDays"
+                label="Discount validity"
+                defaultValue={String(Math.max(1, Math.round(data.config.referrerDiscount.validity_seconds / 86400)))}
+                min={1}
+                step={1}
+                inputMode="numeric"
+                suffix="days"
+              />
+              <s-stack direction="block" gap="small-200">
+                <s-checkbox
+                  name="referrerMinOrderOn"
+                  value="on"
+                  label="Set minimum order amount"
+                  {...(referrerMinOrderOn ? { checked: true } : {})}
+                  onChange={(e: Event) =>
+                    setReferrerMinOrderOn((e.currentTarget as HTMLInputElement).checked)
+                  }
+                />
+                {referrerMinOrderOn && (
                   <s-money-field
                     name="referrerMinOrder"
-                    label="Minimum order amount (0 = none)"
+                    label="Minimum order amount"
+                    labelAccessibilityVisibility="exclusive"
                     defaultValue={(data.config.referrerDiscount.min_order_amount || 0).toFixed(2)}
                     min={0}
                   />
-                </>
-              )}
+                )}
+              </s-stack>
             </s-stack>
           </s-section>
 
@@ -353,28 +353,35 @@ export default function ReferralAdmin() {
               >
                 First-time customers only
               </s-choice>
-              <s-choice
-                value="preventDeviceReuse"
-                {...(data.config.preventDeviceReuse ? { selected: true } : {})}
-              >
-                Prevent same device from reusing a referral link
-              </s-choice>
             </s-choice-list>
           </s-section>
 
           <s-section heading="Limits">
-            <s-number-field
-              name="maxReferralsPerUser"
-              label="Max successful referrals per customer (blank = unlimited)"
-              defaultValue={
-                data.config.maxReferralsPerUser == null
-                  ? ""
-                  : String(data.config.maxReferralsPerUser)
-              }
-              min={1}
-              inputMode="numeric"
-              placeholder="Unlimited"
-            />
+            <s-stack direction="block" gap="small-200">
+              <s-checkbox
+                name="limitReferralsOn"
+                value="on"
+                label="Limit successful referrals per customer"
+                {...(limitReferralsOn ? { checked: true } : {})}
+                onChange={(e: Event) =>
+                  setLimitReferralsOn((e.currentTarget as HTMLInputElement).checked)
+                }
+              />
+              {limitReferralsOn && (
+                <s-number-field
+                  name="maxReferralsPerUser"
+                  label="Max successful referrals per customer"
+                  labelAccessibilityVisibility="exclusive"
+                  defaultValue={
+                    data.config.maxReferralsPerUser == null
+                      ? ""
+                      : String(data.config.maxReferralsPerUser)
+                  }
+                  min={1}
+                  inputMode="numeric"
+                />
+              )}
+            </s-stack>
           </s-section>
 
           <s-section heading="Recent referrals">
@@ -391,7 +398,7 @@ export default function ReferralAdmin() {
                 <s-table-body>
                   {data.recent.map((r) => (
                     <s-table-row key={r.id}>
-                      <s-table-cell>{r.friendEmail}</s-table-cell>
+                      <s-table-cell>{r.friendEmail ?? "—"}</s-table-cell>
                       <s-table-cell>{r.referrerEmail}</s-table-cell>
                       <s-table-cell>{r.status}</s-table-cell>
                       <s-table-cell>{new Date(r.createdAt).toLocaleString()}</s-table-cell>
@@ -418,20 +425,12 @@ export default function ReferralAdmin() {
                 Friend reward: {formatDiscount(data.config.refereeDiscount)}
               </s-list-item>
               <s-list-item>
-                Customer reward:{" "}
-                {data.config.referrerDiscount.type === "NONE"
-                  ? "No incentive"
-                  : formatDiscount(data.config.referrerDiscount)}
+                Customer reward: {formatDiscount(data.config.referrerDiscount)}
               </s-list-item>
               <s-list-item>
                 {data.config.firstPurchaseOnly
                   ? "First-time customers only"
                   : "All customers eligible"}
-              </s-list-item>
-              <s-list-item>
-                {data.config.preventDeviceReuse
-                  ? "Device reuse blocked"
-                  : "Device reuse allowed"}
               </s-list-item>
             </s-unordered-list>
           </s-section>
@@ -442,7 +441,6 @@ export default function ReferralAdmin() {
 }
 
 function formatDiscount(d: DiscountConfig): string {
-  if (d.type === "NONE") return "No incentive";
   const amount = d.type === "PERCENT" ? `${d.amount}%` : `$${d.amount.toFixed(2)}`;
   return `${amount} off`;
 }

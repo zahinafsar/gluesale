@@ -65,7 +65,6 @@ model ReferralConfig {
   referrerDiscount    Json     @default("{\"type\":\"PERCENT\",\"amount\":10,\"validity_seconds\":2592000,\"max_uses\":1,\"min_order_amount\":0}")
   maxReferralsPerUser Int?
   firstPurchaseOnly   Boolean  @default(true)
-  preventDeviceReuse  Boolean  @default(true)
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
@@ -113,22 +112,19 @@ model Referral {
   referralConfig     ReferralConfig @relation(fields: [referralConfigId], references: [id], onDelete: Cascade)
   referrerId         String
   referrer           Referrer       @relation(fields: [referrerId], references: [id], onDelete: Cascade)
-  refereeId          String         @unique
-  referee            Referee        @relation(fields: [refereeId], references: [id], onDelete: Cascade)
+  refereeId          String?        @unique
+  referee            Referee?       @relation(fields: [refereeId], references: [id], onDelete: SetNull)
   refereeDiscountId  String?        @unique
   refereeDiscount    Discount?      @relation("RefereeDiscount", fields: [refereeDiscountId], references: [id])
   referrerDiscountId String?        @unique
   referrerDiscount   Discount?      @relation("ReferrerDiscount", fields: [referrerDiscountId], references: [id])
   status             ReferralStatus @default(CLAIMED)
   orderId            String?
-  ipHash             String?
-  userAgent          String?
   createdAt          DateTime       @default(now())
   convertedAt        DateTime?
 
   @@index([referralConfigId, status])
   @@index([referrerId, status])
-  @@index([referrerId, ipHash])
 }
 
 model Discount {

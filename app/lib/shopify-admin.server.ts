@@ -42,9 +42,6 @@ export async function createDiscountCode(
     appliesOncePerCustomer?: boolean;
   },
 ): Promise<{ nodeId: string }> {
-  if (opts.type === "NONE") {
-    throw new Error("createDiscountCode called with type=NONE");
-  }
   const customerGets =
     opts.type === "PERCENT"
       ? { value: { percentage: opts.amount / 100 }, items: { all: true } }

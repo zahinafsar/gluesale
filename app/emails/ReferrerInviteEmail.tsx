@@ -12,15 +12,17 @@ import {
 type Props = {
   shop: string;
   shareUrl: string;
-  refereePercent: number;
-  refererPercent: number;
+  refereeLabel: string;
+  refererLabel: string;
+  conditions: string[];
 };
 
 export function ReferrerInviteEmail({
   shop,
   shareUrl,
-  refereePercent,
-  refererPercent,
+  refereeLabel,
+  refererLabel,
+  conditions,
 }: Props) {
   const storeName = shop.replace(/\.myshopify\.com$/, "");
   return (
@@ -34,17 +36,23 @@ export function ReferrerInviteEmail({
           <Text style={heading}>Your referral link is ready</Text>
           <Text style={p}>
             Hi, thanks for your order. You can share the link below with friends. They get{" "}
-            <strong style={pct}>{refereePercent}%</strong> off their first order, and you get{" "}
-            <strong style={pct}>{refererPercent}%</strong> off your next one when they purchase.
+            <strong style={pct}>{refereeLabel}</strong> on their first order, and you get{" "}
+            <strong style={pct}>{refererLabel}</strong> on your next one when they purchase.
           </Text>
           <Section style={linkBox}>
             <Text style={linkLabel}>Your link</Text>
             <Text style={linkText}>{shareUrl}</Text>
           </Section>
-          <Text style={muted}>
-            One reward per referred customer. New customers only. Reply to this email if you have
-            any questions.
-          </Text>
+          {conditions.length > 0 && (
+            <Section style={termsBox}>
+              <Text style={termsTitle}>Terms &amp; conditions</Text>
+              {conditions.map((c) => (
+                <Text key={c} style={termsItem}>
+                  • {c}
+                </Text>
+              ))}
+            </Section>
+          )}
         </Container>
       </Body>
     </Html>
@@ -61,6 +69,8 @@ const pct = { color: "#1f2328", fontWeight: 700 };
 const linkBox = { background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 6, padding: 12, margin: "0 0 16px" };
 const linkLabel = { fontSize: 12, color: "#6b7280", margin: "0 0 4px" };
 const linkText = { fontSize: 14, color: "#0a58ca", margin: 0, wordBreak: "break-all" as const };
-const muted = { color: "#6b7280", fontSize: 12, margin: 0, lineHeight: "18px" };
+const termsBox = { margin: "0 0 16px" };
+const termsTitle = { fontSize: 12, fontWeight: 600, color: "#6b7280", margin: "0 0 6px" };
+const termsItem = { fontSize: 12, color: "#6b7280", margin: "0 0 2px", lineHeight: "18px" };
 
 export default ReferrerInviteEmail;
