@@ -61,8 +61,8 @@ async function handle(request: Request) {
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  handle(request);
-}
+  return handle(request);
+};
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   if (request.method === "OPTIONS") return preflight();
