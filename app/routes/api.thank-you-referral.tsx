@@ -1,6 +1,10 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate, unauthenticated } from "../shopify.server";
-import { getOrCreateBrand, getOrCreateCustomer, getOrCreateReferrer } from "../lib/customer.server";
+import {
+  getOrCreateBrand,
+  getOrCreateCustomer,
+  getOrCreateReferrer,
+} from "../lib/customer.server";
 import { getReferralConfig } from "../lib/feature.server";
 import { buildShareLink } from "../lib/referral.server";
 import { getOrderContact } from "../lib/shopify-admin.server";
@@ -34,7 +38,9 @@ async function handle(request: Request) {
   const { admin } = await unauthenticated.admin(shop);
   const contact = await getOrderContact(admin.graphql, orderId);
   if (!contact?.email) return cors(Response.json({ active: false }));
-  if (contact.numberOfOrders > 1) return cors(Response.json({ active: false }));
+  if (config.firstPurchaseOnly && contact.numberOfOrders > 1) {
+    return cors(Response.json({ active: false }));
+  }
 
   const customer = await getOrCreateCustomer(brand, { email: contact.email });
   const referrer = await getOrCreateReferrer(config, customer);
@@ -54,7 +60,9 @@ async function handle(request: Request) {
   );
 }
 
-export const loader = async ({ request }: LoaderFunctionArgs) => handle(request);
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  handle(request);
+}
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   if (request.method === "OPTIONS") return preflight();
