@@ -195,6 +195,21 @@ export default function ReferralAdmin() {
             </s-choice-list>
           </s-section>
 
+          <s-section heading="Show on your Thank-you page">
+            <s-stack direction="block" gap="base">
+              <s-paragraph>
+                Add the Gluesale block to your Thank-you page to invite customers to refer friends
+                right after checkout.
+              </s-paragraph>
+              <s-button
+                href={`https://${data.brand.shop}/admin/settings/checkout/editor?page=thank-you&context=apps`}
+                target="_top"
+              >
+                Open Thank-you editor
+              </s-button>
+            </s-stack>
+          </s-section>
+
           <s-section heading="Friend reward">
             <s-stack direction="block" gap="base">
               <s-paragraph>Choose the reward for friends who receive the link</s-paragraph>
