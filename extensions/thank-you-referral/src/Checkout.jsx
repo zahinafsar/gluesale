@@ -2,10 +2,6 @@ import '@shopify/ui-extensions/preact';
 import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 
-// Gluesale backend that returns the buyer's referral link.
-// Update to your tunnel URL when running `shopify app dev`.
-const APP_URL = 'https://app.gluesale.com';
-
 export default async () => {
   render(<Extension />, document.body);
 };
@@ -21,10 +17,11 @@ function Extension() {
         const orderId = shopify.orderConfirmation?.value?.order?.id;
         if (!orderId) return;
 
-        const token = await shopify.sessionToken.get();
+        const domain = shopify.shop?.myshopifyDomain;
+        if (!domain) return;
         const res = await fetch(
-          `${APP_URL}/api/thank-you-referral?orderId=${encodeURIComponent(orderId)}`,
-          { headers: { Authorization: `Bearer ${token}` } },
+          `https://${domain}/apps/referral/share?orderId=${encodeURIComponent(orderId)}`,
+          { credentials: 'omit' },
         );
         if (!res.ok) return;
 

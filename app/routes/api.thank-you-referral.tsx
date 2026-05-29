@@ -20,7 +20,9 @@ function corsHeaders(request: Request): Record<string, string> {
     "Access-Control-Allow-Origin": request.headers.get("Origin") ?? "*",
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Methods": "GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    // Echo requested headers — the checkout sandbox adds cache-control/pragma.
+    "Access-Control-Allow-Headers":
+      request.headers.get("Access-Control-Request-Headers") ?? "Authorization, Content-Type",
     Vary: "Origin",
   };
 }
