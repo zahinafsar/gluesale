@@ -289,6 +289,7 @@ async function sendReferrerInvite(args: {
   try {
     await sendEmail({
       to: customer.email,
+      from: "referral@gluesale.com",
       subject: `Your referral link for ${storeName}`,
       entityRefId: order.id,
       react: ReferrerInviteEmail({
