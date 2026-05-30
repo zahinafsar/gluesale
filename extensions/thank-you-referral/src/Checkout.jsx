@@ -17,8 +17,10 @@ function Extension() {
         const orderId = shopify.orderConfirmation?.value?.order?.id;
         if (!orderId) return;
 
+        const token = await shopify.sessionToken.get();
         const res = await fetch(
           `https://app.gluesale.com/api/thank-you-referral?orderId=${encodeURIComponent(orderId)}`,
+          { headers: { Authorization: `Bearer ${token}` } },
         );
         if (!res.ok) return;
 
