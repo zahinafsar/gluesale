@@ -17,11 +17,8 @@ function Extension() {
         const orderId = shopify.orderConfirmation?.value?.order?.id;
         if (!orderId) return;
 
-        const domain = shopify.shop?.myshopifyDomain;
-        if (!domain) return;
         const res = await fetch(
-          `https://${domain}/apps/referral/share?orderId=${encodeURIComponent(orderId)}`,
-          { credentials: 'omit' },
+          `https://app.gluesale.com/api/thank-you-referral?orderId=${encodeURIComponent(orderId)}`,
         );
         if (!res.ok) return;
 
