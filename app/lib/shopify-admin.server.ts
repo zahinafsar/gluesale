@@ -28,30 +28,6 @@ export async function findCustomerByEmail(
   return { id: node.id, email: node.email, numberOfOrders: Number.isFinite(count) ? count : 0 };
 }
 
-export async function getOrderContact(
-  graphql: AdminClient,
-  orderId: string,
-): Promise<{ email: string | null; numberOfOrders: number } | null> {
-  const resp = await graphql(
-    `#graphql
-    query OrderContact($id: ID!) {
-      order(id: $id) {
-        email
-        customer { numberOfOrders }
-      }
-    }`,
-    { variables: { id: orderId.replace("OrderIdentity", "Order") } },
-  );
-  const json = (await resp.json()) as {
-    data?: { order?: { email?: string | null; customer?: { numberOfOrders: string | number } | null } | null };
-  };
-  const order = json.data?.order;
-  if (!order) return null;
-  const raw = order.customer?.numberOfOrders;
-  const count = typeof raw === "string" ? parseInt(raw, 10) : raw ?? 1;
-  return { email: order.email ?? null, numberOfOrders: Number.isFinite(count) ? count : 1 };
-}
-
 export async function createDiscountCode(
   graphql: AdminClient,
   opts: {

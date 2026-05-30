@@ -5,13 +5,15 @@ import { sendEmail } from "./resend.server";
 import { generateDiscountCode } from "./code.server";
 import { createDiscountCode } from "./shopify-admin.server";
 import { ReferrerRewardEmail } from "../emails/ReferrerRewardEmail";
+import { ReferrerInviteEmail } from "../emails/ReferrerInviteEmail";
 import {
   getOrCreateBrand,
   getOrCreateCustomer,
   getOrCreateReferee,
+  getOrCreateReferrer,
 } from "./customer.server";
 import { getReferralConfig } from "./feature.server";
-import { parseDiscountConfig, formatDiscountLabel } from "./discount-config";
+import { parseDiscountConfig, formatDiscountLabel, describeDiscountConditions } from "./discount-config";
 
 const norm = (s: string) => s.trim().toLowerCase();
 
@@ -107,8 +109,11 @@ export async function processReferral(args: {
 
   const discountCode = order.discount_codes?.[0]?.code ?? null;
   if (discountCode) {
-    await convertClaim({ shop, brand, config, order, discountCode });
+    const matched = await convertClaim({ shop, brand, config, order, discountCode });
+    if (matched) return;
   }
+
+  await sendReferrerInvite({ shop, brand, config, order });
 }
 
 async function convertClaim(args: {
@@ -241,6 +246,61 @@ async function linkReferee(args: {
   }
 }
 
+async function sendReferrerInvite(args: {
+  shop: string;
+  brand: Brand;
+  config: ReferralConfig;
+  order: ProcessReferralOrder;
+}): Promise<void> {
+  const { shop, brand, config, order } = args;
+
+  const email = norm(order.email ?? "");
+  if (!email) return;
+  if (toOrderCount(order.customer?.numberOfOrders) > 1) return;
+
+  const customer = await getOrCreateCustomer(brand, {
+    email,
+    shopifyCustomerId: order.customer?.id ?? null,
+  });
+  const referrer = await getOrCreateReferrer(config, customer);
+  if (referrer.welcomeEmailedAt) return;
+
+  const shareUrl = buildShareLink({ shop, code: referrer.code });
+  const storeName = shop.replace(/\.myshopify\.com$/, "");
+  const refereeDiscount = parseDiscountConfig(config.refereeDiscount);
+  const referrerDiscount = parseDiscountConfig(config.referrerDiscount);
+
+  const conditions: string[] = [];
+  if (config.firstPurchaseOnly) conditions.push("Friends must be new customers");
+  conditions.push("One reward per referred customer");
+  conditions.push(
+    `Friend's ${formatDiscountLabel(refereeDiscount)}: ${describeDiscountConditions(refereeDiscount).join(", ")}`,
+  );
+  conditions.push(
+    `Your ${formatDiscountLabel(referrerDiscount)} reward: ${describeDiscountConditions(referrerDiscount).join(", ")}`,
+  );
+
+  try {
+    await sendEmail({
+      to: customer.email,
+      subject: `Your referral link for ${storeName}`,
+      entityRefId: order.id,
+      react: ReferrerInviteEmail({
+        shop,
+        shareUrl,
+        refereeLabel: formatDiscountLabel(refereeDiscount),
+        refererLabel: formatDiscountLabel(referrerDiscount),
+        conditions,
+      }),
+    });
+    await prisma.referrer.update({
+      where: { id: referrer.id },
+      data: { welcomeEmailedAt: new Date() },
+    });
+  } catch (e) {
+    console.error("[referral] referrer invite email failed", e);
+  }
+}
 
 export function buildShareLink(opts: { shop: string; code: string }): string {
   return `https://${opts.shop}/apps/referral?c=${encodeURIComponent(opts.code)}`;
